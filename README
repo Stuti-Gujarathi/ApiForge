@@ -1,0 +1,258 @@
+# APIForge
+
+**An internal API marketplace and governance platform.** Teams publish their APIs to one catalogue; developers discover them, check their live health and request access; owners approve consumers and manage versions; the platform team reviews and audits everything.
+
+Built with **ASP.NET Core 10** (Clean Architecture, EF Core, SignalR) and **Angular 21** (standalone components, signals, zoneless change detection).
+
+> Most portfolio projects are CRUD over a business domain. APIForge solves an engineering-platform problem — API sprawl — and exercises the parts of a .NET stack that make a profile look senior: background services, real-time push, token rotation, resource-level authorization, audit trails, caching and API lifecycle management.
+
+---
+
+## What it does
+
+| Area | Capabilities |
+|---|---|
+| **Discovery** | Searchable catalogue with filters (team, domain, lifecycle, tag, minimum availability) and sorting. Filters live in the URL, so every view is shareable. Each API shows its last 24 health checks as a live strip. |
+| **Lifecycle governance** | Draft → Submitted → Under review → Published → Production → Deprecated → Retired, enforced in the domain model. Review steps are reserved for platform admins. Consumers are notified on deprecation. |
+| **Versioning** | Release versions as Beta or Production. Releasing to production deprecates the previous version with a configurable support window (default 180 days). Compare any two versions to see which operations were added or removed. |
+| **OpenAPI import** | Upload or paste an OpenAPI 3.x / Swagger 2.0 JSON document; operations are extracted, grouped by tag and searchable. The original document can be downloaded again. |
+| **Access workflow** | Developers request specific permissions for a named application and environment. Owners approve (optionally narrowing permissions and setting expiry) or reject with a reason. Low-risk APIs can auto-approve. |
+| **Credentials** | Approval creates a client ID. Only the consumer can generate the client secret; it is shown **once**, stored as a SHA-256 hash, and can be rotated or revoked. |
+| **Health monitoring** | A `BackgroundService` probes every published API each minute, classifies it as Healthy, Degraded or Down, and pushes results to browsers over SignalR. Owners are notified when their API goes down. |
+| **Health score** | A 0–100 score combining availability, error rate, P95 latency, documentation, security and governance — with a breakdown explaining every point lost. |
+| **Usage analytics** | Requests, success/error rates, average and P95 latency, and status-class breakdown over 24 hours, 7 days or 30 days. |
+| **Audit log** | Every sensitive action (sign-ins, lifecycle moves, releases, approvals, secret rotation, role changes, health changes) is written in the **same transaction** as the change. |
+| **Administration** | Manage roles, teams and account status. Deactivation revokes all sessions. |
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Angular 21 — standalone components, signals, zoneless, lazy-loaded routes, reactive forms, `@microsoft/signalr` |
+| Backend | ASP.NET Core 10 Web API, Clean Architecture (Domain / Application / Infrastructure / API / Contracts) |
+| Data | SQL Server, Entity Framework Core 10 (interceptors, primitive collections, `ExecuteUpdate/Delete`) |
+| Auth | JWT access tokens (15 min) + rotating refresh tokens in an HttpOnly cookie, RBAC + permission policies + resource checks |
+| Real time | SignalR (strongly typed hub) |
+| Caching | `IDistributedCache` — Redis when configured, in-memory otherwise |
+| Docs | Built-in OpenAPI (`Microsoft.AspNetCore.OpenApi`) + Swagger UI |
+| Delivery | Docker, docker compose, nginx, GitHub Actions |
+
+---
+
+## Architecture
+
+```
+                 Angular 21 SPA  ──── SignalR (/hubs/platform) ────┐
+                       │ HTTPS /api                                │
+                       ▼                                           │
+ ┌──────────────────────── ApiForge.API ─────────────────────────┐ │
+ │ Controllers · JWT auth · permission policies · rate limiting   │◄┘
+ │ ProblemDetails · security headers · OpenAPI · PlatformHub      │
+ └───────────────────────────────┬───────────────────────────────┘
+                                 ▼
+ ┌──────────────────── ApiForge.Application ─────────────────────┐
+ │ Use cases: catalogue, versions, access, credentials, health,   │
+ │ analytics, dashboard, admin, audit · OpenAPI parser · Authz    │
+ └──────────────┬─────────────────────────────────┬──────────────┘
+                ▼                                 ▼
+ ┌─────── ApiForge.Domain ───────┐   ┌──── ApiForge.Infrastructure ────┐
+ │ Entities & business rules:    │   │ EF Core + SQL Server, interceptor│
+ │ lifecycle transitions,        │   │ PBKDF2 hashing, JWT issuing      │
+ │ version release/deprecation,  │   │ Redis cache, HTTP health probe   │
+ │ access decisions, credential  │   │ HealthMonitoringWorker           │
+ │ rules, health score           │   │ (BackgroundService), seed data   │
+ └───────────────────────────────┘   └──────────────────────────────────┘
+```
+
+Dependencies point inwards: **Domain** has no dependencies; **Application** depends on Domain and abstractions it defines (`IApplicationDbContext`, `ICurrentUser`, `IHealthProbe`, `IRealtimePublisher`…); **Infrastructure** implements them; **API** composes everything. **Contracts** holds the request/response DTOs and depends on nothing.
+
+---
+
+## Getting started
+
+### Option 1 — Docker (everything in one command)
+
+```bash
+docker compose up --build
+```
+
+| URL | What |
+|---|---|
+| http://localhost:4200 | The web app |
+| http://localhost:4200/swagger | Interactive API docs |
+| http://localhost:5080 | The API directly |
+
+SQL Server, Redis, the API and the nginx-served frontend all start together. The database is created and seeded on first run.
+
+### Option 2 — Run locally
+
+**Prerequisites:** .NET 10 SDK, Node.js 22.12+ (or 20.19+/24+), and SQL Server (LocalDB on Windows, or `docker run` a SQL Server container).
+
+```bash
+# 1. API — http://localhost:5080/swagger
+cd backend
+dotnet run --project src/ApiForge.API
+
+# 2. Web app — http://localhost:4200 (proxies /api and /hubs to :5080)
+cd frontend
+npm install
+npm start
+```
+
+The default connection string targets `(localdb)\MSSQLLocalDB`. To use another server, set it without touching config files:
+
+```bash
+dotnet user-secrets set "ConnectionStrings:ApiForge" "Server=localhost,1433;Database=ApiForge;User Id=sa;Password=...;TrustServerCertificate=True" --project src/ApiForge.API
+```
+
+Outside Development, `Auth:SigningKey` **must** be supplied (≥ 32 characters) via user-secrets or the `Auth__SigningKey` environment variable — the API refuses to start without it.
+
+### Demo accounts
+
+Every account uses the password **`Forge@123`**. The sign-in page has one-click buttons for the first three.
+
+| Person | Email | Role | Good for trying |
+|---|---|---|---|
+| Priya Nair | admin@apiforge.dev | Platform admin | Reviewing the Shipping API, audit log, people and teams |
+| Arjun Mehta | arjun@apiforge.dev | API owner, Payments | Approving Kabir's pending request, releasing versions, health |
+| Kabir Shah | kabir@apiforge.dev | Developer, Order Fulfilment | Requesting access, generating a client secret |
+| Neha Kulkarni | neha@apiforge.dev | API owner, Customer Platform | Owner view of customer APIs |
+| Rohan Iyer | rohan@apiforge.dev | API owner, Order Fulfilment | Approving Neha's Order API request |
+| Ananya Rao | ananya@apiforge.dev | Developer, Customer Platform | A rejected request and an active credential |
+
+### A five-minute walkthrough
+
+1. Sign in as **Kabir**. Search the catalogue for "payment" and open **Payment API**. Look at the Health and Usage tabs — the strip updates every minute.
+2. Open **Credentials** and choose **Generate secret** on the Customer Profile credential. Copy it: it will never be shown again.
+3. Sign in as **Arjun**. The bell and the sidebar badge show Kabir's pending request. Approve it, narrowing the permissions if you like.
+4. Still as Arjun, open Payment API → **Versions**, compare v2.3 with v3.0, then **Promote** v3.0. v2.3 becomes deprecated with a support window and its consumers are notified.
+5. Sign in as **Priya**. Open **Shipping API** (under review) and **Publish** it. Then read the **Audit log** — every step above is there.
+
+### About the demo data
+
+On first start the database is seeded with five teams, six people and twelve APIs, including 30 days of usage and 24 hours of health history. To make health monitoring real rather than faked, the API serves simulated health endpoints at `/mock/{api}/health` with per-API latency and failure profiles (the Legacy Billing and Inventory APIs are deliberately flaky). A `DemoTrafficSimulator` keeps hourly usage flowing in place of a gateway feed. Everything demo-related is behind the `Demo` configuration section and can be switched off:
+
+```json
+"Demo": { "SeedData": false, "MockServices": false, "SimulateTraffic": false }
+```
+
+---
+
+## Project structure
+
+```
+ApiForge/
+├── backend/
+│   ├── ApiForge.sln
+│   ├── Directory.Build.props         # net10.0, nullable, analyzers for every project
+│   ├── Directory.Packages.props      # central NuGet version management
+│   ├── src/
+│   │   ├── ApiForge.Domain/          # entities, enums, lifecycle & version rules, health score
+│   │   ├── ApiForge.Contracts/       # request/response DTOs (dependency-free)
+│   │   ├── ApiForge.Application/     # use-case services, abstractions, OpenAPI parser, permissions
+│   │   ├── ApiForge.Infrastructure/  # EF Core, security, caching, health probe & worker, seed data
+│   │   └── ApiForge.API/             # controllers, SignalR hub, middleware, Program.cs
+│   ├── tests/ApiForge.UnitTests/     # xUnit: domain rules, health score, parser, security
+│   └── Dockerfile
+├── frontend/
+│   ├── src/app/
+│   │   ├── core/        # models, services (auth, realtime, API clients), interceptor, guards
+│   │   ├── shared/      # check strip, line chart, modal, badges, pipes, *afCan directive
+│   │   ├── layout/      # shell, sidebar, notifications menu
+│   │   └── features/    # dashboard, api-catalog, api-details, api-registration,
+│   │                    # access-requests, credentials, audit, admin, auth
+│   ├── nginx.conf
+│   └── Dockerfile
+├── docs/CASE_STUDY.md
+├── docker-compose.yml
+└── .github/workflows/ci.yml
+```
+
+---
+
+## Engineering decisions worth discussing
+
+**Session security.** Access tokens live only in memory and expire after 15 minutes. Refresh tokens are 512-bit random values in an `HttpOnly`, `SameSite=Strict` cookie scoped to `/api/auth`, stored server-side only as SHA-256 hashes. Every refresh rotates the token; presenting an already-rotated token is treated as theft and revokes every session for that user. Sign-in is rate-limited per IP, and unknown emails still cost a full PBKDF2 verification so response timing cannot reveal which accounts exist.
+
+**Authorization in three layers.** Roles map to fine-grained permissions (`api.create`, `access.approve`, `audit.read`…), and each permission is an ASP.NET Core policy. Resource-level rules then decide ownership — an API owner can only manage their own team's APIs — and lifecycle review transitions are reserved for platform admins regardless of permission.
+
+**Client secrets.** A secret is generated only by the consumer who owns the credential, returned once with `Cache-Control: no-store`, and stored as a SHA-256 hash (secrets are 256-bit random, so a slow hash adds nothing). Revoking clears the hash immediately.
+
+**Health monitoring on the server.** Probing runs in a `BackgroundService` with a `PeriodicTimer`, bounded parallelism and per-probe timeouts — monitoring never depends on someone having a dashboard open. Results are recorded, the 24-hour aggregates cache is invalidated, owners are notified on transitions to Down, and every result is pushed over SignalR. Probe history is pruned after a retention window.
+
+**Versioning without breaking consumers.** Releasing a production version never removes the old one; it deprecates it with a published support-until date, notifies every active consumer and keeps the migration guide alongside. The comparison view shows exactly which operations a consumer loses.
+
+**Audit logging.** Audit entries are added to the same `DbContext` unit of work as the change, so a change and its audit record commit or fail together. Timestamps are stamped by an EF Core `SaveChangesInterceptor`, which ignores operational fields written by the health monitor so "recently updated" stays meaningful.
+
+**Resilient caching.** Catalogue facets and 24-hour health aggregates are cached through `IDistributedCache`. A Redis outage degrades to reading the database; it never fails a request.
+
+**Frontend.** Zoneless Angular with signals throughout. Catalogue filters are URL state. The HTTP interceptor refreshes an expired token once and replays the request, with concurrent callers sharing a single refresh. Dialogs use the native `<dialog>` element for focus trapping and Escape handling. The initial bundle is about 82 kB transferred; every page is lazy-loaded.
+
+---
+
+## API reference
+
+Full, interactive documentation is at `/swagger`. The main endpoints:
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| POST | `/api/auth/register` · `/login` · `/refresh` · `/logout` | Sessions (refresh token in cookie) |
+| GET | `/api/auth/me` | Current user and permissions |
+| GET | `/api/apis` | Search the catalogue |
+| GET | `/api/apis/facets` | Filter options |
+| GET · POST · PUT | `/api/apis` · `/api/apis/{id}` | Read, register, update an API |
+| POST | `/api/apis/{id}/lifecycle` | Move through the lifecycle |
+| POST | `/api/apis/{id}/versions` | Release a version |
+| POST | `/api/apis/{id}/versions/{versionId}/promote` | Promote beta → production |
+| POST · GET | `/api/apis/{id}/versions/{versionId}/openapi` | Import / download the OpenAPI document |
+| GET | `/api/apis/{id}/versions/{versionId}/endpoints` | Operations in a version |
+| GET | `/api/apis/{id}/versions/compare?from=&to=` | Diff two versions |
+| GET · POST | `/api/apis/{id}/health` · `/health/check` | Health detail and score / probe now |
+| GET | `/api/apis/{id}/analytics?range=24h\|7d\|30d` | Usage analytics |
+| GET | `/api/apis/{id}/consumers` | Who consumes an API (owners) |
+| POST · GET | `/api/access-requests` | Request access / list (`scope=mine\|approvals`) |
+| POST | `/api/access-requests/{id}/approve` · `/reject` · `/cancel` | Decide on a request |
+| GET | `/api/subscriptions` | Your credentials |
+| POST | `/api/subscriptions/{id}/secret` · `/revoke` | Generate/rotate secret, revoke |
+| GET | `/api/dashboard` | Overview for the signed-in user |
+| GET · POST | `/api/notifications` · `/{id}/read` · `/read-all` | In-app notifications |
+| GET · PUT | `/api/admin/users` · `/{id}/role` · `/{id}/status` | User administration |
+| GET · POST | `/api/teams` | Teams |
+| GET | `/api/audit` | Audit log search |
+| WS | `/hubs/platform` | `HealthChanged` and `Notification` events |
+
+---
+
+## Tests and CI
+
+```bash
+cd backend && dotnet test
+```
+
+The unit tests cover the lifecycle and versioning rules, access-request and credential rules, the health score, the OpenAPI parser, password hashing and secret generation. GitHub Actions builds and tests the backend, builds the Angular app, and builds both container images on every push and pull request.
+
+## Database and migrations
+
+On start-up the API applies EF Core migrations if the project has any; otherwise it creates the schema directly, so a fresh clone runs with no extra steps. To move to migrations:
+
+```bash
+cd backend
+dotnet tool install --global dotnet-ef
+dotnet ef migrations add InitialCreate -p src/ApiForge.Infrastructure -s src/ApiForge.API
+```
+
+From then on the app applies migrations automatically.
+
+## Roadmap
+
+- Gateway metrics ingestion endpoint to replace the demo traffic simulator
+- OpenAPI spec storage in Azure Blob Storage and YAML import
+- Integration tests with `WebApplicationFactory` and Testcontainers for SQL Server
+- Azure deployment (Container Apps + Azure SQL + Azure Cache for Redis) from the CI pipeline
+- Per-consumer rate limits enforced from granted permissions
+
+---
+
+<p align="center">Stuti Gujarathi | @codewithstuti</p>
